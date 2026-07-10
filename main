@@ -1,0 +1,284 @@
+import os
+import sqlite3
+import pandas as pd
+import kagglehub
+
+# Loading Data
+path = kagglehub.dataset_download(
+    "adarshsng/lending-club-loan-data-csv"
+)
+
+print("Path to dataset files:", path)
+
+csv_file = os.path.join(path, "loan.csv")
+
+df = pd.read_csv(
+    csv_file,
+    low_memory=False
+)
+
+print("Dataset Shape:", df.shape)
+
+# Cleaning Data
+    # Create default flag
+df["default_flag"] = (
+    df["loan_status"]
+    .isin(["Default", "Charged Off"])
+    .astype(int)
+)
+
+    # Convert issue date
+df["issue_d"] = pd.to_datetime(
+    df["issue_d"],
+    format="%b-%Y",
+    errors="coerce"
+)
+
+    # Vintage year
+df["vintage_year"] = df["issue_d"].dt.year
+
+    # Clean interest rate
+df["int_rate"] = (
+    df["int_rate"]
+    .astype(str)
+    .str.replace("%", "", regex=False)
+)
+
+df["int_rate"] = pd.to_numeric(
+    df["int_rate"],
+    errors="coerce"
+)
+
+    # Convert numeric columns
+numeric_cols = [
+    "loan_amnt",
+    "annual_inc",
+    "dti"
+]
+
+for col in numeric_cols:
+    df[col] = pd.to_numeric(
+        df[col],
+        errors="coerce"
+    )
+
+# Feature Engineering
+    # Loan-to-income ratio
+df["loan_to_income"] = (
+    df["loan_amnt"] /
+    df["annual_inc"]
+)
+
+    # Extract term months
+df["term_months"] = (
+    df["term"]
+    .astype(str)
+    .str.extract(r"(\d+)")
+    .astype(float)
+)
+
+    # Income segments
+df["income_segment"] = pd.qcut(
+    df["annual_inc"],
+    q=4,
+    labels=[
+        "Low",
+        "Medium",
+        "High",
+        "Very High"
+    ],
+    duplicates="drop"
+)
+
+    # DTI segments
+df["dti_bucket"] = pd.cut(
+    df["dti"],
+    bins=[0, 10, 20, 30, 100],
+    labels=[
+        "Low DTI",
+        "Medium DTI",
+        "High DTI",
+        "Very High DTI"
+    ]
+)
+
+# Save to sqlite
+conn = sqlite3.connect("loans.db")
+
+df.to_sql(
+    "loans",
+    conn,
+    if_exists="replace",
+    index=False
+)
+
+# Cohort Analysis
+cohort_df = pd.read_sql_query("""
+SELECT
+    vintage_year,
+    grade,
+    COUNT(*) AS total_loans,
+    SUM(default_flag) AS defaults,
+    ROUND(
+        100.0 * SUM(default_flag) / COUNT(*),
+        2
+    ) AS default_rate
+FROM loans
+GROUP BY vintage_year, grade
+ORDER BY vintage_year, grade
+""", conn)
+
+# Default rate by grade
+grade_analysis = pd.read_sql_query("""
+SELECT
+    grade,
+    COUNT(*) AS total_loans,
+    SUM(default_flag) AS defaults,
+    ROUND(
+        100.0 * SUM(default_flag) / COUNT(*),
+        2
+    ) AS default_rate
+FROM loans
+GROUP BY grade
+ORDER BY grade
+""", conn)
+
+# Default rate by term
+term_analysis = pd.read_sql_query("""
+SELECT
+    term_months,
+    COUNT(*) AS total_loans,
+    SUM(default_flag) AS defaults,
+    ROUND(
+        100.0 * SUM(default_flag) / COUNT(*),
+        2
+    ) AS default_rate
+FROM loans
+GROUP BY term_months
+ORDER BY term_months
+""", conn)
+
+# Default rate by vintage year
+vintage_analysis = pd.read_sql_query("""
+SELECT
+    vintage_year,
+    COUNT(*) AS total_loans,
+    SUM(default_flag) AS defaults,
+    ROUND(
+        100.0 * SUM(default_flag) / COUNT(*),
+        2
+    ) AS default_rate
+FROM loans
+GROUP BY vintage_year
+ORDER BY vintage_year
+""", conn)
+
+# Default rate by income
+income_analysis = pd.read_sql_query("""
+SELECT
+    income_segment,
+    COUNT(*) AS total_loans,
+    SUM(default_flag) AS defaults,
+    ROUND(
+        100.0 * SUM(default_flag) / COUNT(*),
+        2
+    ) AS default_rate
+FROM loans
+GROUP BY income_segment
+""", conn)
+
+# Default rate by DTI Analysis
+dti_analysis = pd.read_sql_query("""
+SELECT
+    dti_bucket,
+    COUNT(*) AS total_loans,
+    SUM(default_flag) AS defaults,
+    ROUND(
+        100.0 * SUM(default_flag) / COUNT(*),
+        2
+    ) AS default_rate
+FROM loans
+GROUP BY dti_bucket
+""", conn)
+
+# RISK TIER TABLE
+risk_tiers = grade_analysis.copy()
+
+risk_tiers["risk_tier"] = pd.cut(
+    risk_tiers["default_rate"],
+    bins=[0, 5, 10, 20, 100],
+    labels=[
+        "Low Risk",
+        "Moderate Risk",
+        "High Risk",
+        "Very High Risk"
+    ]
+)
+
+# PRINT RESULTS
+print("\nDEFAULT RATE BY GRADE")
+print(grade_analysis)
+
+print("\nDEFAULT RATE BY TERM")
+print(term_analysis)
+
+print("\nDEFAULT RATE BY VINTAGE YEAR")
+print(vintage_analysis)
+
+print("\nRISK TIERS")
+print(risk_tiers)
+
+# EXPORT TO EXCEL
+with pd.ExcelWriter(
+    "Loan_Default_Risk_Analysis.xlsx",
+    engine="openpyxl"
+) as writer:
+
+    cohort_df.to_excel(
+        writer,
+        sheet_name="Vintage_Grade_Cohort",
+        index=False
+    )
+
+    grade_analysis.to_excel(
+        writer,
+        sheet_name="Grade_Analysis",
+        index=False
+    )
+
+    term_analysis.to_excel(
+        writer,
+        sheet_name="Term_Analysis",
+        index=False
+    )
+
+    vintage_analysis.to_excel(
+        writer,
+        sheet_name="Vintage_Analysis",
+        index=False
+    )
+
+    income_analysis.to_excel(
+        writer,
+        sheet_name="Income_Analysis",
+        index=False
+    )
+
+    dti_analysis.to_excel(
+        writer,
+        sheet_name="DTI_Analysis",
+        index=False
+    )
+
+    risk_tiers.to_excel(
+        writer,
+        sheet_name="Risk_Tiers",
+        index=False
+    )
+
+print("\nAnalysis completed successfully.")
+print("Created:")
+print(" - loans.db")
+print(" - Loan_Default_Risk_Analysis.xlsx")
+
+conn.close()
